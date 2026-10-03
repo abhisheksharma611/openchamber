@@ -300,6 +300,10 @@ export const registerOpenCodeProxy = (app, deps) => {
     SSE_UPSTREAM_STALL_TIMEOUT_MS = DEFAULT_UPSTREAM_STALL_TIMEOUT_MS,
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
     readWorktreeBootstrapStatus = getWorktreeBootstrapStatus,
+    // Every directory-scoped request initializes a location in OpenCode, and a
+    // location owns MCP server processes. Counting them is what lets the
+    // lifecycle notice that a restart would reclaim a lot.
+    recordInstanceDirectory = null,
     WORKTREE_READY_TIMEOUT_MS = 5 * 60 * 1000,
     // OpenCode 2.x has no archive route, so archive state is OpenChamber's own
     // and the proxy folds it onto the sessions it serves (`time.archived`).
@@ -911,6 +915,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     const url = new URL(req.url, 'http://localhost');
     const directory = url.searchParams.get('directory') || req.get('x-opencode-directory');
     if (!directory) return next();
+    if (recordInstanceDirectory) recordInstanceDirectory(directory);
 
     const deadline = Date.now() + WORKTREE_READY_TIMEOUT_MS;
     try {

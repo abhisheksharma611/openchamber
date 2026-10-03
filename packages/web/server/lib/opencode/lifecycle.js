@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { stripAppImageArgv0Leak, stripAppImageLauncherEnv } from '../inherited-env.js';
 import { registerManagedProcess, unregisterManagedProcess, reapOrphanedProcesses } from './managed-process-registry.js';
+import { instanceDirectoryTracker as instanceDirectoryTrackerDefault } from './instance-directory-tracker.js';
 import { applyProviderEnvAliases } from './provider-env-aliases.js';
 import { recordStartupPerformance } from './startup-performance.js';
 import { topUpV1Migration } from './v1-migration-topup.js';
@@ -53,6 +54,12 @@ const classifyOpenCodeVersion = (version) => {
 // other projects "just in case" started processes nobody asked for (#4018).
 const WARMUP_DIRECTORY_LIMIT = 1;
 const WARMUP_REQUEST_TIMEOUT_MS = 30000;
+// Same cost as above, counted the other way round. Every directory OpenChamber
+// routes - one per standalone chat, plus one per worktree - boots a location
+// that keeps its MCP servers for as long as the process lives, and OpenCode
+// offers no way to release a single one. Past this many, restarting the
+// managed server while nothing is running gives all of them back.
+const INSTANCE_DIRECTORY_RECLAIM_LIMIT = 16;
 const MANAGED_STDERR_TAIL_MAX_BYTES = 32 * 1024;
 const HEALTH_FAILURE_DETAIL_MAX_LENGTH = 256;
 
@@ -139,6 +146,8 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     getActiveSessionCount = () => 0,
     reapManagedOrphanedProcesses = reapOrphanedProcesses,
     getWarmupDirectories = async () => [],
+    instanceDirectoryTracker = instanceDirectoryTrackerDefault,
+    instanceDirectoryReclaimLimit = INSTANCE_DIRECTORY_RECLAIM_LIMIT,
     onOpenCodeRestarted = null,
     managedStartupTimeoutMs = 30_000,
     now = Date.now,
@@ -1342,11 +1351,30 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     return { skip: true, staleBusy: false };
   };
 
+  const reclaimInstanceDirectories = async (source) => {
+    if (!instanceDirectoryTracker) return false;
+    const tracked = instanceDirectoryTracker.size();
+    if (tracked <= instanceDirectoryReclaimLimit) return false;
+    // A restart tears down every location, including the one somebody is
+    // working in. Only ever do this with nothing running.
+    if (getActiveSessionCount() > 0) return false;
+    console.log(
+      `[lifecycle] ${source}: ${tracked} OpenCode instance directories in use (limit ${instanceDirectoryReclaimLimit}), restarting to release them`
+    );
+    instanceDirectoryTracker.reset();
+    await restartOpenCode(`${source}-instance-directory-reclaim`);
+    return true;
+  };
+
   const runHealthCheckCycle = async (source) => {
     if (!state.openCodeProcess || state.isShuttingDown || state.isRestartingOpenCode) return;
     if (healthCheckCyclePromise) return healthCheckCyclePromise;
 
     healthCheckCyclePromise = (async () => {
+      // Reclaim before looking at health: this runs whether or not OpenCode is
+      // well, and a healthy server is exactly the one still holding the
+      // directories.
+      if (await reclaimInstanceDirectories(source)) return;
       const healthResult = await probeOpenCodeHealth();
       if (!healthResult.healthy) {
         if (!isManagedOpenCodeProcessAlive()) {

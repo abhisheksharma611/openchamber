@@ -1084,3 +1084,74 @@ it('a rejected CLI preflight never permits desktop bootstrap', async () => {
   expect(await runtime.getManagedOpenCodePreflight()).toBe(false);
   expect(spawnMock).not.toHaveBeenCalled();
 });
+
+describe('instance directory reclaim', () => {
+  const healthyFetch = () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const href = typeof input === 'string' ? input : String(input?.url ?? input);
+      if (href.endsWith('/global/health')) return Response.json({ healthy: true, version: '2.0.21' });
+      return Response.json({ ok: true });
+    });
+  };
+
+  const createTracker = (size) => ({
+    record: vi.fn(),
+    size: vi.fn(() => size),
+    values: vi.fn(() => []),
+    reset: vi.fn(),
+  });
+
+  const createLiveRuntime = (overrides, tracker) => {
+    const close = vi.fn(async () => {});
+    healthyFetch();
+    spawnMock.mockImplementation(() => {
+      const child = createMockChild();
+      queueMicrotask(() => child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n'));
+      return child;
+    });
+    return createRuntime(
+      { getActiveSessionCount: () => 0, instanceDirectoryTracker: tracker, ...overrides },
+      {
+        openCodePort: 45678,
+        openCodeProcess: { pid: null, exitCode: null, signalCode: null, close },
+        isOpenCodeReady: true,
+      },
+    );
+  };
+
+  it('restarts a healthy server to hand back accumulated instance directories', async () => {
+    const tracker = createTracker(20);
+    const runtime = createLiveRuntime({}, tracker);
+
+    await runtime.triggerHealthCheck();
+
+    // Nothing here is unhealthy, so the only thing that can restart it is the
+    // reclaim: OpenCode keeps a location - and its MCP servers - per directory
+    // OpenChamber routes, and offers no way to release a single one.
+    expect(tracker.reset).toHaveBeenCalledTimes(1);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    await runtime.testState.openCodeProcess?.close?.();
+  });
+
+  it('leaves a busy session alone rather than reclaiming under it', async () => {
+    const tracker = createTracker(20);
+    const runtime = createLiveRuntime({ getActiveSessionCount: () => 1 }, tracker);
+
+    await runtime.triggerHealthCheck();
+
+    expect(tracker.reset).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+    await runtime.testState.openCodeProcess?.close?.();
+  });
+
+  it('does not restart while the directory count is within the limit', async () => {
+    const tracker = createTracker(3);
+    const runtime = createLiveRuntime({ instanceDirectoryReclaimLimit: 16 }, tracker);
+
+    await runtime.triggerHealthCheck();
+
+    expect(tracker.reset).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+    await runtime.testState.openCodeProcess?.close?.();
+  });
+});

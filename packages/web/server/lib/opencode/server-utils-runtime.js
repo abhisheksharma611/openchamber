@@ -1,4 +1,5 @@
 import { registerOpenCodeProxy } from './proxy.js';
+import { instanceDirectoryTracker } from './instance-directory-tracker.js';
 import { pathLooksUserConfigured, mergePathValues } from './path-utils.js';
 
 export const createServerUtilsRuntime = (dependencies) => {
@@ -193,6 +194,7 @@ export const createServerUtilsRuntime = (dependencies) => {
       buildOpenCodeUrl,
       ensureOpenCodeApiPrefix,
       getSseUpstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
+      recordInstanceDirectory: instanceDirectoryTracker.record,
       getUiNotificationClients,
       getArchivedSessions,
       getStoredSessionMetadata,
